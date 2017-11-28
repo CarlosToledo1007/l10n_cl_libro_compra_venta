@@ -53,11 +53,6 @@ except ImportError:
     _logger.info('Cannot import dicttoxml library')
 
 try:
-    from elaphe import barcode
-except ImportError:
-    _logger.info('Cannot import elaphe library')
-
-try:
     import M2Crypto
 except ImportError:
     _logger.info('Cannot import M2Crypto library')
@@ -171,24 +166,19 @@ class ConsumoFolios(models.Model):
         states={'draft': [('readonly', False)]},)
     total_neto = fields.Monetary(
         string="Total Neto",
-    	readonly=True,
-        states={'draft': [('readonly', False)]},)
+        compute='get_totales',)
     total_iva = fields.Monetary(
         string="Total Iva",
-    	readonly=True,
-        states={'draft': [('readonly', False)]},)
+        compute='get_totales',)
     total_exento = fields.Monetary(
         string="Total Exento",
-    	readonly=True,
-        states={'draft': [('readonly', False)]},)
+        compute='get_totales',)
     total = fields.Monetary(
         string="Monto Total",
-    	readonly=True,
-        states={'draft': [('readonly', False)]},)
+        compute='get_totales',)
     total_boletas = fields.Integer(
         string="Total Boletas",
-    	readonly=True,
-        states={'draft': [('readonly', False)]},)
+        compute='get_totales',)
     company_id = fields.Many2one(
         'res.company',
         required=True,
@@ -237,7 +227,32 @@ class ConsumoFolios(models.Model):
 
     _order = 'fecha_inicio desc'
 
+    @api.model
+    def read_group(self, domain, fields, groupby, offset=0, limit=None, orderby=False, lazy=True):
+        res = super(ConsumoFolios, self).read_group(domain, fields, groupby, offset, limit=limit, orderby=orderby, lazy=lazy)
+        if 'total_iva' in fields:
+            for line in res:
+                if '__domain' in line:
+                    lines = self.search(line['__domain'])
+                    line.update({
+                            'total_neto': 0,
+                            'total_iva': 0,
+                            'total_exento': 0,
+                            'total': 0,
+                            'total_boletas': 0,
+                        })
+                    for l in lines:
+                        line.update({
+                                'total_neto': line['total_neto'] + l.total_neto,
+                                'total_iva': line['total_iva'] + l.total_iva,
+                                'total_exento': line['total_exento'] + l.total_exento,
+                                'total': line['total'] + l.total,
+                                'total_boletas': line['total_boletas'] + l.total_boletas,
+                            })
+        return res
+
     @api.onchange('impuestos')
+    @api.depends('impuestos')
     def get_totales(self):
         for r in self:
             total_iva = 0
@@ -259,7 +274,6 @@ class ConsumoFolios(models.Model):
 
 
     @api.onchange('move_ids', 'anulaciones')
-    @api.depends('move_ids')
     def _resumenes(self):
         resumenes, TpoDocs = self._get_resumenes()
         if self.impuestos and isinstance(self.id, int):
@@ -921,7 +935,7 @@ version="1.0">
                 if not TpoDoc in resumenes:
                     resumenes[TpoDoc] = collections.OrderedDict()
                 resumenes[TpoDoc] = self._setResumen(resumen, resumenes[TpoDoc])
-            rec.sended = marc
+            #rec.sended = marc
         if 'pos.order' in self.env:
             current = self.fecha_inicio + ' 03:00:00'
             next_day = (datetime.strptime(current, DTF) + relativedelta.relativedelta(days=1)).strftime('%Y-%m-%d') + ' 03:00:00'
@@ -1083,33 +1097,10 @@ version="1.0">
             self.state = "Proceso"
             if 'SII:RESP_BODY' in resp['SII:RESPUESTA'] and resp['SII:RESPUESTA']['SII:RESP_BODY']['RECHAZADOS'] == "1":
                 self.sii_result = "Rechazado"
-        elif resp['SII:RESPUESTA']['SII:RESP_HDR']['ESTADO'] == "RCT":
+        elif resp['SII:RESPUESTA']['SII:RESP_HDR']['ESTADO'] in ["RCT", "RCH", "RSC"]:
             self.state = "Rechazado"
-            status = {'warning':{'title':_('Error RCT'), 'message': _(resp['SII:RESPUESTA']['GLOSA'])}}
+            status = {'warning':{'title':_('Error RCT'), 'message': _(resp['SII:RESPUESTA']['SII:RESP_HDR']['GLOSA'])}}
         return status
-
-    def _get_dte_status(self, signature_d, token):
-        url = server_url[self.company_id.dte_service_provider] + 'QueryEstDte.jws?WSDL'
-        ns = 'urn:'+ server_url[self.company_id.dte_service_provider] + 'QueryEstDte.jws'
-        _server = SOAPProxy(url, ns)
-        receptor = self.format_vat(self.partner_id.vat)
-        date = datetime.strptime(self.date, "%Y-%m-%d").strftime("%d-%m-%Y")
-        respuesta = _server.getEstDte(signature_d['subject_serial_number'][:8], str(signature_d['subject_serial_number'][-1]),
-                self.company_id.vat[2:-1],self.company_id.vat[-1], receptor[:8],receptor[2:-1],str(self.document_class_id.sii_code), str(self.sii_document_number),
-                date, str(self.amount_total),token)
-        self.sii_message = respuesta
-        resp = xmltodict.parse(respuesta)
-        if resp['SII:RESPUESTA']['SII:RESP_HDR']['ESTADO'] == '2':
-            status = {'warning':{'title':_("Error code: 2"), 'message': _(resp['SII:RESPUESTA']['SII:RESP_HDR']['GLOSA'])}}
-            return status
-        if resp['SII:RESPUESTA']['SII:RESP_HDR']['ESTADO'] == "EPR":
-            self.state = "Proceso"
-            if 'SII:RESP_BODY' in resp['SII:RESPUESTA'] and resp['SII:RESPUESTA']['SII:RESP_BODY']['RECHAZADOS'] == "1":
-                self.state = "Rechazado"
-            if resp['SII:RESPUESTA']['SII:RESP_BODY']['REPARO'] == "1":
-                self.state = "Reparo"
-        elif resp['SII:RESPUESTA']['SII:RESP_HDR']['ESTADO'] == "RCT":
-            self.state = "Rechazado"
 
     @api.multi
     def ask_for_dte_status(self):

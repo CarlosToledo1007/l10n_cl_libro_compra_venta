@@ -54,11 +54,6 @@ except ImportError:
     _logger.info('Cannot import dicttoxml library')
 
 try:
-    from elaphe import barcode
-except ImportError:
-    _logger.info('Cannot import elaphe library')
-
-try:
     import M2Crypto
 except ImportError:
     _logger.info('Cannot import M2Crypto library')
@@ -279,7 +274,7 @@ class Libro(models.Model):
         operator = 'not in'
         query = [
             ('company_id', '=', self.company_id.id),
-            ('sended', '=', False),
+            #('sended', '=', False),
             ('date' , '<', next_month.strftime('%Y-%m-%d')),
             ]
         domain = 'sale'
@@ -294,26 +289,24 @@ class Libro(models.Model):
                 ('periodo_tributario','=', self.periodo_tributario),
                 ('tipo_operacion','=', 'BOLETA'),
             ])
-            if libro_boletas:
-                cfs = self.env['account.move.consumo_folios'].search([
-                    ('state','not in', ['draft']),
-                    ('fecha_inicio','>=', current),
-                    ('fecha_inicio','<', next_month),
-                ])
+            cfs = self.env['account.move.consumo_folios'].search([
+                ('state','not in', [ 'draft', 'Rechazado']),
+                ('fecha_inicio','>=', current),
+                ('fecha_inicio','<', next_month),
+            ])
+            if cfs:
                 cantidad = {}
                 for cf in cfs:
-                    for det in cf.detalles:
-                        if det.tpo_doc.sii_code in [39, 41]:
-                            if  not det.tpo_doc in cantidad:
-                                cantidad[str(det.tpo_doc.sii_code)] += det.cantidad
-                            else:
-                                cantidad[str(det.tpo_doc.sii_code)] += det.cantidad
+                    if not det.tpo_doc in cantidad:
+                        cantidad[str(1)] += cf.total_boletas
+                    else:
+                        cantidad[str(1)] += cf.total_boletas
                 lines = [[5,],]
-                for det in libro_boletas.impuesto:
+                for det in cf.impuestos:
                     line = {
                         'currency_id' : self.env.user.company_id.currency_id,
                         'tipo_boleta' : self.env['sii.document_class'].search([('sii_code','=', 39)],limit=1).id,
-                        'cantidad_boletas' : cantidad['39'] ,
+                        'cantidad_boletas' : cantidad['1'] ,
                         'neto' : det.monto_neto,
                         'impuesto' : self.env['account.tax'].search([('sii_code','=', 14), ('type_tax_use','=','sale'),('company_id','=',self.company_id.id)],limit=1).id,
                         'monto_impuesto' : det.monto_iva,
@@ -1446,31 +1439,8 @@ version="1.0">
                 self.sii_result = "Rechazado"
         elif resp['SII:RESPUESTA']['SII:RESP_HDR']['ESTADO'] == "LRH":
             self.state = "Rechazado"
-            status = {'warning':{'title':_('Error RCT'), 'message': _(resp['SII:RESPUESTA']['GLOSA'])}}
+            status = {'warning':{'title':_('Error RCT'), 'message': _(resp['SII:RESPUESTA']['SII:RESP_HDR']['GLOSA'])}}
         return status
-
-    def _get_dte_status(self, signature_d, token):
-        url = server_url[self.company_id.dte_service_provider] + 'QueryEstDte.jws?WSDL'
-        ns = 'urn:'+ server_url[self.company_id.dte_service_provider] + 'QueryEstDte.jws'
-        _server = SOAPProxy(url, ns)
-        receptor = self.format_vat(self.partner_id.vat)
-        date = datetime.strptime(self.date, "%Y-%m-%d").strftime("%d-%m-%Y")
-        respuesta = _server.getEstDte(signature_d['subject_serial_number'][:8], str(signature_d['subject_serial_number'][-1]),
-                self.company_id.vat[2:-1],self.company_id.vat[-1], receptor[:8],receptor[2:-1],str(self.document_class_id.sii_code), str(self.sii_document_number),
-                date, str(self.amount_total),token)
-        self.sii_message = respuesta
-        resp = xmltodict.parse(respuesta)
-        if resp['SII:RESPUESTA']['SII:RESP_HDR']['ESTADO'] == '2':
-            status = {'warning':{'title':_("Error code: 2"), 'message': _(resp['SII:RESPUESTA']['SII:RESP_HDR']['GLOSA'])}}
-            return status
-        if resp['SII:RESPUESTA']['SII:RESP_HDR']['ESTADO'] == "EPR":
-            self.state = "Proceso"
-            if 'SII:RESP_BODY' in resp['SII:RESPUESTA'] and resp['SII:RESPUESTA']['SII:RESP_BODY']['RECHAZADOS'] == "1":
-                self.state = "Rechazado"
-            if resp['SII:RESPUESTA']['SII:RESP_BODY']['REPARO'] == "1":
-                self.state = "Reparo"
-        elif resp['SII:RESPUESTA']['SII:RESP_HDR']['ESTADO'] == "RCT":
-            self.state = "Rechazado"
 
     @api.multi
     def ask_for_dte_status(self):
